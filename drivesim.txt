@@ -14,16 +14,23 @@ HORIZON_Y = H // 2
 MAX_ROAD_SEGS = 48
 MIN_ROAD_HALF_W = 6
 MAX_ROAD_HALF_W = 140
+ROAD_X_LIMIT = 180.0
+CLOCK = 0
 
-MAX_TREES = 3
+road_target_x = 0.0
+target_timer = 0.0   # counts down while moving
 
-SKY = (0x66, 0xCC, 0xFF)
+MAX_TREES = 6
+MAX_CLOUDS = 20
+
+SKY = [0x99, 0xDD, 0xFF]
 GRASS = (0x22, 0xAA, 0x33)
 ROAD = (0x77, 0x77, 0x77)
 LANE = (0xDD, 0xDD, 0xDD)
 TRUNK = (0x8B, 0x5A, 0x2B)
 LEAVES = (0x22, 0x8B, 0x22)
 BLACK = (0, 0, 0)
+WHITE = (0xFF, 0xFF, 0xFF)
 
 def clamp_inclusive(x, a, b):
   if x < a: return a
@@ -43,6 +50,12 @@ def persp(z):
 def screen_y(z):
   p = persp(z)
   return HORIZON_Y + int(p * (H // 2))
+    
+def screen_y_sky(z):
+  p = persp(z)
+  top = 10
+  bottom = HORIZON_Y - 1
+  return int(top + (bottom - top) * (1 - p))
 
 def road_half_w(z):
   p = persp(z)
@@ -94,6 +107,7 @@ def fill_trapezoid_scanlines(y0, l0, r0, y1, l1, r1, color):
 # -------------------------
 road = []   # each: [z, cx_world]
 trees = []  # each: [z, x_world]
+clouds = []  # each: [z, x_world]
 camera_x = 0.0
 
 road_gen_x = 0.0
@@ -103,10 +117,12 @@ speed = 0.0
 target = 0.0
 
 def reset_world():
-  global road, trees, camera_x, road_gen_x, road_gen_v, speed
+  global road, trees, camera_x, road_gen_x, road_gen_v, speed, road_target_x, target_timer
   camera_x = 0.0
   road_gen_x = 0.0
   road_gen_v = 0.0
+  road_target_x = 0.0
+  target_timer = 1.0   # hold straight for the first ~1.0 "dz units"
   speed = 0.0
 
   # Prefill a straight road so player starts on it
@@ -116,6 +132,7 @@ def reset_world():
     road.append([z, 0.0])
 
   trees = []
+  clouds = []
 
 def ensure_spawn_road_segment():
   global road, road_gen_x, road_gen_v
@@ -130,9 +147,9 @@ def ensure_spawn_road_segment():
   # If the nearest segment has moved forward enough, spawn another at z=0
   if min_z > 0.03 and len(road) < MAX_ROAD_SEGS:
     # Curvature drift
-    accel = random.uniform(-0.35, 0.35)
-    road_gen_v = clamp_inclusive(road_gen_v + accel, -1.6, 1.6)
-    road_gen_x = clamp_inclusive(road_gen_x + road_gen_v, -180.0, 180.0)
+    # accel = random.uniform(-0.35, 0.35)
+    # road_gen_v = clamp_inclusive(road_gen_v + accel, -1.6, 1.6)
+    # road_gen_x = clamp_inclusive(road_gen_x + road_gen_v, -180.0, 180.0)
 
     road.append([0.0, road_gen_x])
 
@@ -166,6 +183,23 @@ def try_spawn_tree():
 
   trees.append([0.0, x])
   return True
+  
+def try_spawn_cloud():
+  global clouds
+
+  if len(clouds) >= MAX_CLOUDS:
+    return False
+
+  # Spawn at horizon
+  rc = road_gen_x
+  w = road_half_w(0.0)
+
+  # Increased buffer + distance so clouds spread out more
+  side = -1 if random.getrandbits(1) == 0 else 1
+  x = rc + side * (random.uniform(60, 360))
+
+  clouds.append([0.0, x])
+  return True
 
 def step_trees(dz):
   global trees
@@ -180,6 +214,53 @@ def step_trees(dz):
   # chance spawn while moving
   if random.random() < 0.06:
     try_spawn_tree()
+    
+def step_clouds(dz):
+  global clouds
+  if dz <= 0:
+    return
+
+  for t in clouds:
+    t[0] += dz * 0.01
+
+  clouds = [c for c in clouds if c[0] <= 1.02]
+
+  # chance spawn while moving
+  if random.random() < 0.02:
+    try_spawn_cloud()
+    
+def update_road_steering(dz):
+  global road_gen_x, road_gen_v, road_target_x, target_timer
+
+  if dz <= 0:
+    return
+
+  # How often we pick a new "curve goal"
+  target_timer -= dz
+  if target_timer <= 0:
+    # Hold this target for a bit (bigger = longer curves)
+    target_timer = random.uniform(1.80, 2.40)
+
+    # Choose a new target near the current position (prevents wild jumps)
+    road_target_x = clamp_inclusive(
+      road_gen_x + random.uniform(-120.0, 120.0),
+      -ROAD_X_LIMIT, ROAD_X_LIMIT
+    )
+
+  # Steering dynamics (tune these)
+  k = 0.82      # steering strength (higher = snaps to target faster)
+  damping = 0.32  # velocity damping (lower = more “floaty”, higher = more stable)
+
+  # Accelerate toward target like a spring
+  error = (road_target_x - road_gen_x)
+  road_gen_v = road_gen_v * damping + error * k
+
+  # Limit max lateral speed so it doesn't whip
+  road_gen_v = clamp_inclusive(road_gen_v, -2.2, 2.2)
+
+  # Move road generator
+  road_gen_x += road_gen_v
+  road_gen_x = clamp_inclusive(road_gen_x, -ROAD_X_LIMIT, ROAD_X_LIMIT)
 
 def draw_road():
   if len(road) < 2:
@@ -216,7 +297,7 @@ def draw_road():
 
 def draw_trees():
   # Trees drawn AFTER road so they appear in front.
-  for z, xw in trees:
+  for z, xw in reversed(trees):
     p = persp(z)
     x = screen_x_from_world(xw, z, camera_x)
     y = screen_y(z)
@@ -236,6 +317,24 @@ def draw_trees():
     fol_h = h // 2
     kd.fill_rect(int(x - fol_w // 2), int(y - trunk_h - fol_h), int(fol_w), int(fol_h), LEAVES)
     kd.fill_rect(int(x - fol_w // 3), int(y - trunk_h - 2*fol_h), int(2*fol_w // 3), int(2*fol_h), LEAVES)
+    kd.fill_rect(int(x - fol_w // 5), int(y - trunk_h - 3*fol_h), int(2*fol_w // 5), int(3*fol_h), LEAVES)
+
+def draw_clouds():
+  for z, xw in clouds:
+    p = persp(z)
+    x = screen_x_from_world(xw, z, camera_x * 0.1)
+    y = screen_y_sky(z)
+
+    h = 0.25 * int(6 + p * 60)
+    w = int(6 + p * 60)
+
+    if h <= 2:
+      kd.fill_rect(x, y, 2, 2, WHITE)
+      continue
+    
+    clo_w = w
+    clo_h = h // 2
+    kd.fill_rect(int(x - clo_w // 2), int(y - clo_h), int(clo_w), int(clo_h), WHITE)
 
 def handle_input():
   global speed, camera_x, target
@@ -248,7 +347,7 @@ def handle_input():
   down = ion.keydown(ion.KEY_DOWN)
   
   if down: target -= 0.002
-  if up: target += 0.001
+  if up and speed < 0.35: target += 0.001
 
   new_speed = speed + (target - speed) * 0.25
   if abs(new_speed - speed) > 1e-4:
@@ -270,6 +369,7 @@ def handle_input():
   return changed
 
 def main():
+  global SKY, CLOCK
   reset_world()
 
   # Deterministic seed; change/remove if you prefer
@@ -277,20 +377,31 @@ def main():
 
   # First draw
   draw_background()
+  draw_clouds()
   draw_road()
   draw_trees()
 
   while True:
+    CLOCK += 1
     input_changed = handle_input()
 
     world_changed = False
     if speed > 0:
+      update_road_steering(speed)
       step_road(speed)
       step_trees(speed)
+      step_clouds(speed)
+      if SKY[1] <= 0x02 and SKY[2] <= 0x88 and CLOCK % 50 == 0:
+        SKY[0] -= 0x02
+        SKY[2] -= 0x01
+      elif CLOCK % 50 == 0:
+        SKY[1] -= 0x01
+        SKY[2] -= 0x01
       world_changed = True
 
     if input_changed or world_changed:
       draw_background()
+      draw_clouds()
       draw_road()
       draw_trees()
 
