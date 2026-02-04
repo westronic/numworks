@@ -419,27 +419,26 @@ def main():
   draw_trees()
 
   while True:
-  CLOCK += 1
+    CLOCK += 1
 
-  input_changed = handle_input()
-  world_changed = False
+    input_changed = handle_input()
+    world_changed = False
 
-  if speed > 0:
-    update_road_steering(speed)
-    step_road(speed)
-    step_trees(speed)
-    step_clouds(speed)
-    world_changed = True
+    if speed > 0:
+      update_road_steering(speed)
+      step_road(speed)
+      step_trees(speed)
+      step_clouds(speed)
+      world_changed = True
 
-  sky_changed = update_sky()
+    sky_changed = update_sky()
 
-  if input_changed or world_changed or sky_changed:
-    draw_background()
-    draw_clouds()
-    draw_road()
-    draw_trees()
+    if input_changed or world_changed or sky_changed:
+      draw_background()
+      draw_clouds()
+      draw_road()
+      draw_trees()
 
-  time.sleep(0.02)
+    time.sleep(0.02)
 
 main()
-
