@@ -24,6 +24,11 @@ MAX_TREES = 6
 MAX_CLOUDS = 20
 
 SKY = [0x99, 0xDD, 0xFF]
+SKY_DIR = -1  # start by darkening the sky
+
+SKY_MIN = [0x10, 0x02, 0x40]  # "night" (tune)
+SKY_MAX = [0x99, 0xDD, 0xFF]  # "day"
+
 GRASS = (0x22, 0xAA, 0x33)
 ROAD = (0x77, 0x77, 0x77)
 LANE = (0xDD, 0xDD, 0xDD)
@@ -336,6 +341,38 @@ def draw_clouds():
     clo_h = h // 2
     kd.fill_rect(int(x - clo_w // 2), int(y - clo_h), int(clo_w), int(clo_h), WHITE)
 
+def update_sky():
+  global SKY, SKY_DIR
+
+  # Only update every N frames
+  if CLOCK % 50 != 0:
+    return False
+
+  old0, old1, old2 = SKY[0], SKY[1], SKY[2]
+
+  # Step sizes
+  dr = 0x02
+  dg = 0x01
+  db = 0x01
+
+  SKY[0] += SKY_DIR * dr
+  SKY[1] += SKY_DIR * dg
+  SKY[2] += SKY_DIR * db
+
+  # Clamp
+  SKY[0] = clamp_inclusive(SKY[0], SKY_MIN[0], SKY_MAX[0])
+  SKY[1] = clamp_inclusive(SKY[1], SKY_MIN[1], SKY_MAX[1])
+  SKY[2] = clamp_inclusive(SKY[2], SKY_MIN[2], SKY_MAX[2])
+
+  # Reverse at endpoints
+  if SKY == SKY_MIN:
+    SKY_DIR = +1
+  elif SKY == SKY_MAX:
+    SKY_DIR = -1
+
+  # Did anything actually change?
+  return (SKY[0] != old0 or SKY[1] != old1 or SKY[2] != old2)
+
 def handle_input():
   global speed, camera_x, target
 
@@ -382,29 +419,27 @@ def main():
   draw_trees()
 
   while True:
-    CLOCK += 1
-    input_changed = handle_input()
+  CLOCK += 1
 
-    world_changed = False
-    if speed > 0:
-      update_road_steering(speed)
-      step_road(speed)
-      step_trees(speed)
-      step_clouds(speed)
-      if SKY[1] <= 0x02 and SKY[2] <= 0x88 and CLOCK % 50 == 0:
-        SKY[0] -= 0x02
-        SKY[2] -= 0x01
-      elif CLOCK % 50 == 0:
-        SKY[1] -= 0x01
-        SKY[2] -= 0x01
-      world_changed = True
+  input_changed = handle_input()
+  world_changed = False
 
-    if input_changed or world_changed:
-      draw_background()
-      draw_clouds()
-      draw_road()
-      draw_trees()
+  if speed > 0:
+    update_road_steering(speed)
+    step_road(speed)
+    step_trees(speed)
+    step_clouds(speed)
+    world_changed = True
 
-    time.sleep(0.02)
+  sky_changed = update_sky()
+
+  if input_changed or world_changed or sky_changed:
+    draw_background()
+    draw_clouds()
+    draw_road()
+    draw_trees()
+
+  time.sleep(0.02)
 
 main()
+
