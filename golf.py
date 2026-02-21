@@ -12,14 +12,14 @@ import time
 # ─── Colors ───────────────────────────────────────────────────────────────────
 C_DARK_GREEN  = (34,  85,  34)   # rough
 C_FAIRWAY     = (80, 160,  60)   # fairway
-C_GREEN_PATCH = (144, 238, 144)  # putting green
+C_GREEN_PATCH = (127, 238, 127)  # putting green
 C_SAND        = (180, 150,  80)  # bunker
 C_SKY         = (135, 206, 235)  # sky (3D view)
 C_WHITE       = (255, 255, 255)
 C_BLACK       = (0,   0,   0)
-C_GRAY        = (150, 150, 150)
-C_GOLFER      = (120,  40,  40)  # dark red dot
-C_AIM         = (200, 200, 200)  # gray +
+C_GRAY        = (100, 100, 100)
+C_GOLFER      = (160,  60,  60)  # dark red dot
+C_AIM         = (20, 20, 120)    # dark blue
 C_BALL        = (255, 255, 255)
 C_RED         = (180,   0,   0)
 C_GOLD        = (180, 150,  80)
@@ -40,10 +40,10 @@ KEY_EXE   = ion.KEY_EXE
 # ─── Club definitions ─────────────────────────────────────────────────────────
 #  name, distance (map pixels from golfer to aim cross)
 CLUBS = [
-    ("Driver", 90),
+    ("Driver", 115),
     ("Iron",   60),
     ("Wedge",  35),
-    ("Putter", 18),
+    ("Putter", 15),
 ]
 
 # ─── Course definition (map) ──────────────────────────────────────────────────
@@ -135,12 +135,19 @@ def draw_map():
     ay = int(by + dist * math.sin(s["aim_angle"]))
     draw_plus(ax, ay, C_AIM)
 
-    # HUD overlay (bottom-left)
-    fill_rect(0, SH - 40, 180, 40, (0, 0, 0))
-    draw_text("Hole %d, Par %d" % (s["hole"], s["par"]),
+    # HUD overlay (bottom-left unless aim cross is near)
+    if ay < SH - 50:
+        fill_rect(0, SH - 40, 180, 40, (0, 0, 0))
+        draw_text("Hole %d, Par %d" % (s["hole"], s["par"]),
               4, SH - 38, C_WHITE, C_BLACK)
-    draw_text("Stroke %d, %s" % (s["stroke"], club[0]),
-              4, SH - 20, C_YELLOW, C_BLACK)
+        draw_text("Stroke %d, %s" % (s["stroke"], club[0]),
+                  4, SH - 20, C_YELLOW, C_BLACK)
+    else:
+        fill_rect(0, 0, 180, 40, (0, 0, 0))
+        draw_text("Hole %d, Par %d" % (s["hole"], s["par"]),
+              4, 2, C_WHITE, C_BLACK)
+        draw_text("Stroke %d, %s" % (s["stroke"], club[0]),
+                  4, 20, C_YELLOW, C_BLACK)
 
 def map_phase():
     s = state
@@ -174,29 +181,99 @@ def map_phase():
 
 # ─── METERS PHASE (3D view + accuracy + power) ────────────────────────────────
 
-def draw_3d_scene(accuracy_marker=None, power_marker=None):
-    """Draw the pseudo-3D fairway view."""
+# --- Terrain classification ---
+
+# Map terrain type -> display color in 3D view
+TERRAIN_COLORS = {
+    "rough":   C_DARK_GREEN,
+    "fairway": C_FAIRWAY,
+    "sand":    C_SAND,
+    "green":   C_GREEN_PATCH,
+}
+
+def classify_point(mx, my):
+    """Return terrain type string for a map coordinate."""
+    gx, gy, gw, gh = GREEN_RECT
+    if gx <= mx <= gx + gw and gy <= my <= gy + gh:
+        return "green"
+    sx, sy, sw2, sh2 = SAND_RECT
+    if sx <= mx <= sx + sw2 and sy <= my <= sy + sh2:
+        return "sand"
+    for r in FAIRWAY_RECTS:
+        if r[0] <= mx <= r[0] + r[2] and r[1] <= my <= r[1] + r[3]:
+            return "fairway"
+    return "rough"
+
+def build_scene_bands():
+    """
+    Sample a 3-ring x 3-column grid in front of the golfer on the map.
+    Returns a 3x3 list (rows = near..far, cols = left/center/right)
+    of terrain type strings.
+    """
+    s = state
+    bx, by = s["ball_pos"]
+    angle  = s["aim_angle"]
+    club   = CLUBS[s["club_idx"]]
+    dist   = club[1]
+    perp   = angle - math.pi / 2   # perpendicular (leftward) direction
+
+    # Depth fractions of shot distance to sample
+    depth_fracs    = [0.05, 0.35, 0.65]
+    # Lateral offsets in map pixels (left, center, right)
+    lateral_offs   = [-dist * 0.35, 0.0, dist * 0.35]
+
+    bands = []
+    for df in depth_fracs:
+        row = []
+        cx = bx + dist * df * math.cos(angle)
+        cy = by + dist * df * math.sin(angle)
+        for lo in lateral_offs:
+            px = cx + lo * math.cos(perp)
+            py = cy + lo * math.sin(perp)
+            row.append(classify_point(px, py))
+        bands.append(row)
+    return bands   # [0]=near row, [2]=far row; each row=[left, center, right]
+
+def draw_3d_scene(accuracy_marker=None, power_marker=None, scene_bands=None):
+    """Draw the pseudo-3D fairway view with terrain from scene_bands."""
     # Sky
     fill_rect(0, 30, SW, 110, C_SKY)
-    # Ground (fairway)
-    fill_rect(0, 140, SW, SH - 140, C_FAIRWAY)
-    # Rough left
-    fill_rect(0, 100, 60, SH - 100, C_DARK_GREEN)
-    # Rough right hint
-    fill_rect(260, 120, SW - 260, SH - 120, C_DARK_GREEN)
 
-    # Sand bunker as trapezoid (approximated with diminishing-width rects)
-    # In 3D: bunker appears roughly at center-right, nearer = wider
-    bx_center, by_base = 190, 165
-    for i in range(20):
-        prog = i / 20.0
-        w = int(80 * (1 - prog * 0.5))
-        y = by_base - i
-        x = bx_center - w // 2
-        fill_rect(x, y, w, 1, C_SAND)
+    # Ground plane divided into 3 depth bands painted as perspective trapezoids.
+    # Screen y: 222=near (feet), 140=horizon.
+    # Band screen y boundaries:
+    #   near  (row 0): y 185..222
+    #   mid   (row 1): y 158..185
+    #   far   (row 2): y 140..158
+    band_tops = [185, 158, 140]
+    band_bots = [222, 185, 158]
+    horizon_y = 140
+    # Prefill dark green background to refresh view
+    fill_rect(0, horizon_y, SW, SH - horizon_y, C_DARK_GREEN)
+
+    if scene_bands is None:
+        scene_bands = [["fairway", "fairway", "fairway"]] * 3
+
+    for band_idx in range(3):
+        row    = scene_bands[band_idx]
+        y_top  = band_tops[band_idx]
+        y_bot  = band_bots[band_idx]
+        for y in range(y_top, y_bot):
+            # Perspective: visible half-width (hw) grows linearly at horizon
+            t  = (y - horizon_y) / (222 - horizon_y)
+            hw = int(SW // 2 * t + 60*(1-t))  # Set 60 to 0 for shrinking to a point
+            xl = SW // 2 - hw
+            total_w = hw * 2
+            if total_w <= 0:
+                continue
+            seg   = total_w // 3
+            rem   = total_w - seg * 2
+            fill_rect(xl,         y, seg, 1, TERRAIN_COLORS.get(row[0], C_FAIRWAY))
+            fill_rect(xl + seg,   y, seg, 1, TERRAIN_COLORS.get(row[1], C_FAIRWAY))
+            fill_rect(xl + seg*2, y, rem, 1, TERRAIN_COLORS.get(row[2], C_FAIRWAY))
 
     # Golf ball
-    fill_rect(SW//2 - 5, 172, 10, 10, C_WHITE)
+    fill_rect(SW//2 - 5, 196, 10, 10, C_WHITE)
 
     # Meters bar at top
     draw_meters_bar(accuracy_marker, power_marker)
@@ -245,8 +322,10 @@ def draw_meters_bar(accuracy_marker, power_marker):
 def meters_phase():
     s = state
 
-    # Draw the 3D scene once — it won't change during meter sweeps
-    draw_3d_scene(accuracy_marker=None, power_marker=None)
+    # Sample terrain once from the map, then draw the scene (static during sweeps)
+    scene_bands = build_scene_bands()
+    s["scene_bands"] = scene_bands
+    draw_3d_scene(accuracy_marker=None, power_marker=None, scene_bands=scene_bands)
 
     # ── Accuracy sweep — only redraw the top bar ──
     acc_pos = 0.0   # -1 to 1
@@ -307,7 +386,7 @@ def motion_phase():
 
     steps = 40
     ball_start_x = SW // 2
-    ball_start_y = 172
+    ball_start_y = 196
 
     for i in range(steps + 1):
         t = i / steps  # 0..1
@@ -326,9 +405,10 @@ def motion_phase():
         ball_screen_x = bx
         ball_size = max(2, int(10 * (1 - t * 0.7)))
 
-        # Redraw scene
+        # Redraw scene using the terrain bands sampled at shot time
         draw_3d_scene(accuracy_marker=s["last_accuracy"],
-                      power_marker=s["last_power"])
+                      power_marker=s["last_power"],
+                      scene_bands=s.get("scene_bands"))
 
         # Draw gray arc up to current point
         for j in range(i):
@@ -419,13 +499,19 @@ def draw_green_view(show_aim=True):
         ay = int(gsy + dist_screen * math.sin(s["aim_angle"]))
         draw_plus(ax, ay, C_AIM)
 
-    # HUD overlay (bottom-left)
-    club = CLUBS[s["club_idx"]]
-    fill_rect(0, SH - 40, 180, 40, C_BLACK)
-    draw_text("Hole %d, Par %d" % (s["hole"], s["par"]),
-              4, SH - 38, C_WHITE, C_BLACK)
-    draw_text("Stroke %d, %s" % (s["stroke"], club[0]),
-              4, SH - 20, C_YELLOW, C_BLACK)
+        # HUD overlay (bottom-left unless aim cross / golfer is near)
+        if ay < SH - 50 and (gsy < SH - 50 or gsx > 2 * SW//3):
+            fill_rect(0, SH - 40, 180, 40, (0, 0, 0))
+            draw_text("Hole %d, Par %d" % (s["hole"], s["par"]),
+                  4, SH - 38, C_WHITE, C_BLACK)
+            draw_text("Stroke %d, %s" % (s["stroke"], club[0]),
+                  4, SH - 20, C_YELLOW, C_BLACK)
+        else:
+            fill_rect(0, 30, 180, 40, (0, 0, 0))
+            draw_text("Hole %d, Par %d" % (s["hole"], s["par"]),
+                  4, 32, C_WHITE, C_BLACK)
+            draw_text("Stroke %d, %s" % (s["stroke"], club[0]),
+                  4, 50, C_YELLOW, C_BLACK)
 
     # Meter bar at top (static — no markers during aiming)
     draw_meters_bar(None, None)
@@ -617,10 +703,10 @@ def main():
         elif s["phase"] == "green_putt":
             green_putt_phase()
 
-        # Win condition: ball within 6px of hole (smaller target = harder)
+        # Win condition: ball within 3px of hole (smaller target = harder)
         bx, by = s["ball_pos"]
         hx, hy = HOLE_POS
-        if math.sqrt((bx-hx)**2 + (by-hy)**2) < 6:
+        if math.sqrt((bx-hx)**2 + (by-hy)**2) < 3:
             fill_rect(0, 0, SW, SH, C_BLACK)
             draw_text("HOLE IN %d!" % s["stroke"], 80, 100, C_YELLOW, C_BLACK)
             draw_text("Press OK to exit", 80, 120, C_WHITE, C_BLACK)
